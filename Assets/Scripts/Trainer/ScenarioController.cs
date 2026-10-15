@@ -1,5 +1,7 @@
 using System;
 using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.SceneManagement;
 using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using UnityEngine.XR.Interaction.Toolkit.Interactors;
@@ -17,7 +19,7 @@ public class ScenarioController : MonoBehaviour
     [SerializeField, TextArea] private string _textStep1 = "Возьмите объект A со стола.";
     [SerializeField, TextArea] private string _textStep2 = "Подойдите к объекту B и установите в него объект A.";
     [SerializeField, TextArea] private string _textStep3 = "Подойдите к рычагу и переведите его в положение «Включено».";
-    [SerializeField, TextArea] private string _textFinished = "Тренировка завершена.";
+    [SerializeField, TextArea] private string _textFinished = "Тренировка завершена. Нажмите R для перезапуска.";
 
     private TrainerStep _currentStep = TrainerStep.TakeObjectA;
 
@@ -27,6 +29,11 @@ public class ScenarioController : MonoBehaviour
     private void Awake()
     {
         _currentStep = TrainerStep.TakeObjectA;
+        if (!(_textFinished ?? "").EndsWith(" Нажмите R для перезапуска.", StringComparison.Ordinal))
+        {
+            _textFinished += " Нажмите R для перезапуска.";
+        }
+
         _objectA.selectEntered.AddListener(OnObjectAGrabbed);
         _socket.selectEntered.AddListener(OnObjectPlaced);
         _lever.OnLeverOn.AddListener(OnLeverSwitched);
@@ -38,6 +45,15 @@ public class ScenarioController : MonoBehaviour
     private void Start()
     {
         ShowCurrentStep();
+    }
+
+    private void Update()
+    {
+        if (CurrentStep == TrainerStep.Finished &&
+            Keyboard.current != null && Keyboard.current.rKey.wasPressedThisFrame)
+        {
+            SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
+        }
     }
 
     private void OnDestroy()
