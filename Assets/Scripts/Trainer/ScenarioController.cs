@@ -1,8 +1,8 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
-using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using UnityEngine.XR.Interaction.Toolkit.Interactors;
 
@@ -21,130 +21,243 @@ public class ScenarioController : MonoBehaviour
     [SerializeField, TextArea] private string _textStep3 = "Подойдите к рычагу и переведите его в положение «Включено».";
     [SerializeField, TextArea] private string _textFinished = "Тренировка завершена. Нажмите R для перезапуска.";
 
+    [SerializeField] private ScenarioDefinition _scenario;
+    [SerializeField] private List<ScenarioBinding> _bindings = new List<ScenarioBinding>();
+
+    private readonly Dictionary<string, ScenarioBinding> _bindingsById =
+        new Dictionary<string, ScenarioBinding>(StringComparer.Ordinal);
+    private IReadOnlyList<TrainerStepDefinition> _steps;
+    private IScenarioStepStrategy _activeStrategy;
+    private HighlightController _activeHighlight;
+    private int _currentStepIndex;
+    private bool _isFinished;
     private TrainerStep _currentStep = TrainerStep.TakeObjectA;
 
+    public int CurrentStepIndex => _currentStepIndex;
+    public TrainerStepDefinition CurrentStepDefinition =>
+        !_isFinished && _steps != null && _currentStepIndex < _steps.Count
+            ? _steps[_currentStepIndex]
+            : null;
+    public bool IsFinished => _isFinished;
+
+    // Совместимость с прежним API: значение отражает тип действия, не номер шага.
     public TrainerStep CurrentStep => _currentStep;
     public event Action<TrainerStep> StepChanged;
+    public event Action<int> StepIndexChanged;
 
     private void Awake()
     {
-        _currentStep = TrainerStep.TakeObjectA;
-        if (!(_textFinished ?? "").EndsWith(" Нажмите R для перезапуска.", StringComparison.Ordinal))
+        SetGateEnabled(_socket, false);
+        SetGateEnabled(_lever, false);
+
+        foreach (ScenarioBinding binding in _bindings)
         {
-            _textFinished += " Нажмите R для перезапуска.";
+            if (binding != null)
+            {
+                SetGateEnabled(binding.Interactable, false);
+            }
         }
-
-        _objectA.selectEntered.AddListener(OnObjectAGrabbed);
-        _socket.selectEntered.AddListener(OnObjectPlaced);
-        _lever.OnLeverOn.AddListener(OnLeverSwitched);
-
-        _socket.enabled = false;
-        _lever.enabled = false;
     }
 
     private void Start()
     {
-        ShowCurrentStep();
+        try
+        {
+            if (_ui == null)
+            {
+                throw new InvalidOperationException("Не задан TaskUIView.");
+            }
+
+            BuildBindingMap();
+            _steps = _scenario == null ? CreateDefaultSteps() : _scenario.Steps;
+            if (_steps == null || _steps.Count == 0)
+            {
+                throw new InvalidOperationException("Сценарий не содержит шагов.");
+            }
+
+            foreach (TrainerStepDefinition step in _steps)
+            {
+                ValidateStep(step);
+            }
+
+            EnterCurrentStep(false);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError($"ScenarioController: {exception.Message}", this);
+            enabled = false;
+        }
     }
 
     private void Update()
     {
-        if (CurrentStep == TrainerStep.Finished &&
-            Keyboard.current != null && Keyboard.current.rKey.wasPressedThisFrame)
+        if (_isFinished && Keyboard.current != null && Keyboard.current.rKey.wasPressedThisFrame)
         {
             SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
         }
     }
 
-    private void OnDestroy()
+    private void OnDisable()
     {
-        if (_objectA != null)
-        {
-            _objectA.selectEntered.RemoveListener(OnObjectAGrabbed);
-        }
+        _activeStrategy?.Stop();
+        _activeStrategy = null;
+        _activeHighlight?.SetHighlighted(false);
+        _activeHighlight = null;
+    }
 
-        if (_socket != null)
-        {
-            _socket.selectEntered.RemoveListener(OnObjectPlaced);
-        }
+    private void BuildBindingMap()
+    {
+        _bindingsById.Clear();
+        AddDefaultBinding("ObjectA", _objectA, _highlightObjectA);
+        AddDefaultBinding("ObjectB", null, _highlightObjectB);
+        AddDefaultBinding("SocketPoint", _socket, null);
+        AddDefaultBinding("LeverPivot", _lever, _highlightLever);
 
-        if (_lever != null)
+        foreach (ScenarioBinding binding in _bindings)
         {
-            _lever.OnLeverOn.RemoveListener(OnLeverSwitched);
+            AddBinding(binding);
         }
     }
 
-    private void OnObjectAGrabbed(SelectEnterEventArgs args)
+    private void AddDefaultBinding(string id, Component interactable, HighlightController highlight)
     {
-        if (CurrentStep != TrainerStep.TakeObjectA)
+        if (interactable != null || highlight != null)
+        {
+            AddBinding(new ScenarioBinding(id, interactable, highlight));
+        }
+    }
+
+    private void AddBinding(ScenarioBinding binding)
+    {
+        if (binding == null || string.IsNullOrWhiteSpace(binding.Id))
+        {
+            throw new InvalidOperationException("У привязки сцены отсутствует Id.");
+        }
+
+        if (_bindingsById.ContainsKey(binding.Id))
+        {
+            throw new InvalidOperationException($"Повторяется Id привязки '{binding.Id}'.");
+        }
+
+        _bindingsById.Add(binding.Id, binding);
+    }
+
+    private ScenarioBinding ResolveBinding(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id) || !_bindingsById.TryGetValue(id, out ScenarioBinding binding))
+        {
+            throw new InvalidOperationException($"Не найдена привязка сцены '{id}'.");
+        }
+
+        return binding;
+    }
+
+    private List<TrainerStepDefinition> CreateDefaultSteps()
+    {
+        return new List<TrainerStepDefinition>
+        {
+            new TrainerStepDefinition(TrainerAction.Grab, "ObjectA", "", "ObjectA", _textStep1),
+            new TrainerStepDefinition(TrainerAction.PlaceInSocket, "SocketPoint", "ObjectA", "ObjectB", _textStep2),
+            new TrainerStepDefinition(TrainerAction.SwitchLever, "LeverPivot", "", "LeverPivot", _textStep3)
+        };
+    }
+
+    private void ValidateStep(TrainerStepDefinition step)
+    {
+        if (step == null)
+        {
+            throw new InvalidOperationException("Сценарий содержит пустой шаг.");
+        }
+
+        if (ResolveBinding(step.HighlightId).Highlight == null)
+        {
+            throw new InvalidOperationException($"У шага '{step.Text}' не задан HighlightController.");
+        }
+
+        ScenarioStepStrategyFactory.Create(step, ResolveBinding);
+    }
+
+    private void EnterCurrentStep(bool notifyLegacy)
+    {
+        _activeHighlight?.SetHighlighted(false);
+        _activeHighlight = null;
+
+        if (_currentStepIndex >= _steps.Count)
+        {
+            FinishScenario();
+            return;
+        }
+
+        TrainerStepDefinition step = _steps[_currentStepIndex];
+        _currentStep = ToLegacyStep(step.Action);
+        _activeHighlight = ResolveBinding(step.HighlightId).Highlight;
+        _activeHighlight.SetHighlighted(true);
+        _ui.Show(step.Text);
+
+        _activeStrategy = ScenarioStepStrategyFactory.Create(step, ResolveBinding);
+        _activeStrategy.Start(CompleteCurrentStep);
+
+        StepIndexChanged?.Invoke(_currentStepIndex);
+        if (notifyLegacy)
+        {
+            StepChanged?.Invoke(_currentStep);
+        }
+    }
+
+    private void CompleteCurrentStep()
+    {
+        if (_activeStrategy == null || _isFinished)
         {
             return;
         }
 
-        ChangeStep(TrainerStep.PlaceObjectA);
+        _activeStrategy.Stop();
+        _activeStrategy = null;
+        _currentStepIndex++;
+        EnterCurrentStep(true);
     }
 
-    private void OnObjectPlaced(SelectEnterEventArgs args)
+    private void FinishScenario()
     {
-        if (CurrentStep != TrainerStep.PlaceObjectA ||
-            !ReferenceEquals(args.interactableObject, _objectA))
-        {
-            return;
-        }
-
-        ChangeStep(TrainerStep.SwitchLever);
+        _isFinished = true;
+        _currentStep = TrainerStep.Finished;
+        string finishedText = _scenario == null ? _textFinished : _scenario.FinishedText;
+        _ui.Show(WithRestartHint(finishedText));
+        StepIndexChanged?.Invoke(_currentStepIndex);
+        StepChanged?.Invoke(TrainerStep.Finished);
     }
 
-    private void OnLeverSwitched()
+    private static string WithRestartHint(string text)
     {
-        if (CurrentStep != TrainerStep.SwitchLever)
-        {
-            return;
-        }
-
-        ChangeStep(TrainerStep.Finished);
+        const string hint = " Нажмите R для перезапуска.";
+        string message = string.IsNullOrWhiteSpace(text) ? "Тренировка завершена." : text;
+        return message.EndsWith(hint, StringComparison.Ordinal) ? message : message + hint;
     }
 
-    private void ChangeStep(TrainerStep nextStep)
+    private static TrainerStep ToLegacyStep(TrainerAction action)
     {
-        _currentStep = nextStep;
-
-        if (nextStep == TrainerStep.PlaceObjectA)
+        switch (action)
         {
-            _socket.enabled = true;
+            case TrainerAction.Grab:
+                return TrainerStep.TakeObjectA;
+            case TrainerAction.PlaceInSocket:
+                return TrainerStep.PlaceObjectA;
+            case TrainerAction.SwitchLever:
+                return TrainerStep.SwitchLever;
+            default:
+                throw new InvalidOperationException($"Неизвестное действие шага: {action}.");
         }
-        else if (nextStep == TrainerStep.SwitchLever)
-        {
-            _lever.enabled = true;
-        }
-
-        ShowCurrentStep();
-        StepChanged?.Invoke(nextStep);
     }
 
-    private void ShowCurrentStep()
+    private static void SetGateEnabled(Component component, bool on)
     {
-        _highlightObjectA.SetHighlighted(false);
-        _highlightObjectB.SetHighlighted(false);
-        _highlightLever.SetHighlighted(false);
-
-        switch (CurrentStep)
+        if (component is XRSocketInteractor socket)
         {
-            case TrainerStep.TakeObjectA:
-                _highlightObjectA.SetHighlighted(true);
-                _ui.Show(_textStep1);
-                break;
-            case TrainerStep.PlaceObjectA:
-                _highlightObjectB.SetHighlighted(true);
-                _ui.Show(_textStep2);
-                break;
-            case TrainerStep.SwitchLever:
-                _highlightLever.SetHighlighted(true);
-                _ui.Show(_textStep3);
-                break;
-            case TrainerStep.Finished:
-                _ui.Show(_textFinished);
-                break;
+            socket.enabled = on;
+        }
+        else if (component is LeverInteractable lever)
+        {
+            lever.enabled = on;
         }
     }
 }

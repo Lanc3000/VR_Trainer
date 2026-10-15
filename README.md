@@ -10,6 +10,8 @@
 4. Проверьте ссылки в `ScenarioController` на объекте `GameController` и значение **Text Finished**: `Тренировка завершена. Нажмите R для перезапуска.` В текущей сцене в Inspector сохранён старый текст. Скрипт допишет подсказку при запуске, но для совпадения с новым значением по умолчанию обновите поле в Inspector вручную.
 5. Нажмите **Play**. Текст задания виден на `TaskCanvas` перед камерой. После завершения нажмите `R` в активной вкладке **Game** для перезапуска.
 
+Если поле **Scenario** у `GameController` пустое, запускается встроенный сценарий из трёх шагов. Все прежние ссылки сцены и тексты остаются рабочими.
+
 ### Прогон без VR-шлема
 
 Используются официальные **Samples** пакета XR Interaction Toolkit: **Starter Assets** (настройки XR Origin и Input Actions) и **XR Device Simulator**. Если они ещё не импортированы, откройте **Window → Package Manager → XR Interaction Toolkit → Samples** и импортируйте оба образца. Добавьте в сцену префаб `Assets/Samples/XR Interaction Toolkit/3.0.11/XR Device Simulator/XR Device Simulator.prefab` (или используйте **GameObject → XR → XR Device Simulator**, если этот пункт доступен). В текущей `TrainerScene` симулятор уже добавлен: второй экземпляр не нужен.
@@ -42,11 +44,32 @@
 
 | Файл | Ответственность |
 | --- | --- |
-| `Assets/Scripts/Trainer/TrainerStep.cs` | Перечисление четырёх состояний сценария. |
+| `Assets/Scripts/Trainer/TrainerStep.cs` | Совместимость с прежним API из четырёх состояний. Для новых сценариев используйте индекс шага. |
 | `Assets/Scripts/Trainer/HighlightController.cs` | Пульсирующая подсветка через emission экземпляров материалов URP. |
 | `Assets/Scripts/Trainer/TaskUIView.cs` | Вывод текста задания на TMP-панель. |
 | `Assets/Scripts/Trainer/LeverInteractable.cs` | XR-взаимодействие с рычагом, вращение без физики и событие включения. |
-| `Assets/Scripts/Trainer/ScenarioController.cs` | Строгая последовательность, доступность сокета и рычага, подсветка, текст и перезапуск. |
+| `Assets/Scripts/Trainer/ScenarioDefinition.cs` | Данные сценария: упорядоченные шаги, тип действия, идентификаторы целей и текст. |
+| `Assets/Scripts/Trainer/ScenarioBinding.cs` | Связь идентификатора из сценария с компонентом и подсветкой в текущей сцене. |
+| `Assets/Scripts/Trainer/ScenarioStepStrategies.cs` | Стратегии захвата, сокета и рычага: подписка на событие XRI только на время активного шага. |
+| `Assets/Scripts/Trainer/ScenarioController.cs` | Выполнение списка шагов, физический гейтинг, UI, подсветка и перезапуск. |
+
+### Как добавить сценарии и шаги
+
+1. В Project выберите **Assets → Create → Trainer → Scenario**. Создайте отдельный `ScenarioDefinition` для каждого сценария. Ассеты создаются вручную в Unity; код проекта их не создаёт.
+2. В Inspector ассета задайте **Steps** нужной длины — хоть 3, хоть 20 — и **Finished Text**. Порядок элементов списка определяет порядок выполнения. В каждом шаге выберите **Action**, заполните **Target Id**, **Text** и **Highlight Id**. Если **Highlight Id** пуст, используется **Target Id**.
+3. Для `PlaceInSocket` заполните также **Required Object Id**: стратегия проверит, что в сокет попал именно этот объект. Остальным типам шага это поле не нужно.
+4. Перетащите выбранный ассет в поле **Scenario** компонента `ScenarioController` на `GameController`. Для смены сценария назначьте другой ассет и перезапустите Play Mode. Поле **Scenario** можно оставить пустым для встроенного сценария.
+5. Идентификаторы `ObjectA`, `ObjectB`, `SocketPoint`, `LeverPivot` уже связаны со старыми полями `GameController`. Для новых объектов добавьте строку в **Bindings**: **Id** должен совпадать с идентификатором в шаге; в **Interactable** перетащите нужный компонент (`XR Grab Interactable`, `XR Socket Interactor` или `LeverInteractable`), в **Highlight** — `HighlightController`. Для объекта, который используется только как цель подсветки, **Interactable** можно оставить пустым. Не дублируйте встроенные Id.
+
+Пример для текущей сцены:
+
+| Action | Target Id | Required Object Id | Highlight Id |
+| --- | --- | --- | --- |
+| `Grab` | `ObjectA` | пусто | `ObjectA` |
+| `PlaceInSocket` | `SocketPoint` | `ObjectA` | `ObjectB` |
+| `SwitchLever` | `LeverPivot` | пусто | `LeverPivot` |
+
+Контроллер перед стартом проверяет все ссылки и типы компонентов; ошибку привязки пишет в Console. Сокеты и рычаги отключаются в `Awake` и включаются только на своём шаге. Стратегия предыдущего шага отписывается от события перед запуском следующей. Сокет после завершения шага остаётся включённым, чтобы удерживать предмет. `CurrentStepIndex` и событие `StepIndexChanged` показывают положение в списке; после финала индекс равен числу шагов, `IsFinished` становится `true`. Старые `CurrentStep` и `StepChanged` оставлены для совместимости и отражают тип действия, а не уникальный номер шага.
 
 ## Проверка негативных сценариев
 
@@ -64,6 +87,6 @@
 | `ObjectB` → `SocketPoint` | На `ObjectB` — `HighlightController`; на `SocketPoint` — `Sphere Collider` (`Is Trigger`, радиус около `0.2`) и `XR Socket Interactor`. |
 | `LeverBase` → `LeverPivot` → `LeverHandle` | На `LeverPivot` — `LeverInteractable`; на `LeverHandle` — коллайдер для наведения и захвата. `HighlightController` разместите на объекте рычага, содержащем визуальный MeshRenderer в себе или дочерних объектах. |
 | `XR Origin` → `Main Camera` → `TaskCanvas` → `TaskText` | `TaskCanvas`: `Canvas` в режиме `World Space`, локальная позиция `(0, -0.35, 0.9)`, масштаб `(0.001, 0.001, 0.001)`, `TaskUIView`; `TaskText`: `TextMeshProUGUI`. В `TaskUIView.Text` перетащите `TaskText`. |
-| `GameController` | `ScenarioController`: `Object A` → `ObjectA` (`XR Grab Interactable`), `Socket` → `SocketPoint`, `Lever` → `LeverPivot`, три `Highlight` → соответственно `ObjectA`, `ObjectB` и рычаг, `Ui` → `TaskCanvas` (`TaskUIView`). Проверьте четыре текстовых поля, особенно **Text Finished**. |
+| `GameController` | `ScenarioController`: `Object A` → `ObjectA` (`XR Grab Interactable`), `Socket` → `SocketPoint`, `Lever` → `LeverPivot`, три `Highlight` → соответственно `ObjectA`, `ObjectB` и рычаг, `Ui` → `TaskCanvas` (`TaskUIView`). Проверьте четыре текстовых поля, особенно **Text Finished**. Для другого сценария заполните **Scenario** и при необходимости **Bindings**. |
 
 `GameController` — пустой объект в корне Hierarchy. Если его нет, создайте через **GameObject → Create Empty**, назовите `GameController` и добавьте `ScenarioController` через **Add Component**.
